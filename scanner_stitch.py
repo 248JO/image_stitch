@@ -1,5 +1,5 @@
 import cv2
-import glob
+import glob 
 import os
 
 files = sorted(glob.glob("images/*.jpg"))
