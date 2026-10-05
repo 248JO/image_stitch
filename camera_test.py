@@ -53,21 +53,72 @@ print("Camera connected.")
 positions = [(0, 0), (51, 0)]
 
 for x, y in positions:
-    input(f"press enter to simulate a sample move to ({x}, {y})")
-    
-    # give the camera time to settle and autofocus
-    time.sleep(2)
+    print(f"Move sample to ({x}, {y})")     #eventually: move_motor(x, y), wait for motion, capture frame, and image capture/queue
+    print("Press SPACE in the preview window to capture.")
+    print("Press Q to quit.") 
 
-    # grab a few frames so an old buffered frame is not being saved
-    for _ in range(5):
+    while True:
+
         ret, frame = camera.read()
 
+        if not ret:
+            print("Could not read camera frame.")
+            break
+
+        # make a copy just for the preview
+        preview = frame.copy()
+
+        # optional text overlay
+        cv2.putText(
+            preview,
+            f"Position: ({x}, {y})",
+            (20, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2
+        )
+
+        cv2.putText(
+            preview,
+            "SPACE = capture | Q = quit",
+            (20, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2
+        )
+
+        # show live camera preview
+        cv2.imshow("Camera Preview", preview)
+
+        key = cv2.waitKey(1) & 0xFF
+
+        # SPACE pressed
+        if key == ord(" "):
+            break
+
+        # Q pressed
+        if key == ord("q"):
+            camera.release()
+            cv2.destroyAllWindows()
+
+            image_queue.join()
+            image_queue.put(None)
+            stitch_thread.join()
+
+            print("Scan cancelled.")
+            exit()
+
     if not ret:
-        print("could not capture image")
         continue
+
+    # camera has already been streaming,
+    # so you don't really need to throw away 5 buffered frames anymore
 
     filename = f"test_x{x:03d}_y{y:03d}.jpg"
     path = os.path.join(OUTPUT_FOLDER, filename)
+
 
     cv2.imwrite(path, frame)
 
@@ -79,6 +130,7 @@ for x, y in positions:
     print("image added to queue")
 
 camera.release()
+cv2.destroyAllWindows()
 
 # wait until all captured images have been processed
 image_queue.join()
