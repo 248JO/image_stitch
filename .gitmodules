@@ -1,0 +1,3 @@
+[submodule "image_stitch"]
+	path = image_stitch
+	url = https://github.com/248JO/image_stitch.git
