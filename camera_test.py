@@ -3,7 +3,7 @@ import os
 import time
 import queue
 import threading
-from stitch import process_image
+from stitch import process_image, finish_stitching
 
 # create folder for captured images
 OUTPUT_FOLDER = "camera_test_output"
@@ -139,5 +139,6 @@ image_queue.join()
 image_queue.put(None)
 
 stitch_thread.join()
+finish_stitching()
 
 print("test image capture sucessful")
