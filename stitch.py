@@ -1,13 +1,19 @@
 import cv2
 import numpy as np
 import os
-
+from datetime import datetime
 
 OUTPUT_FOLDER = "outputs"
 
 #pre made images used when stitch.py is run directly
-IMG1_PATH = "images/demo_split_left_52overlap.jpg"
-IMG2_PATH = "images/demo_split_right_52overlap.jpg"
+TEST_IMAGE_PATHS = [
+    "images/solar_test_3_left_35overlap.jpg",
+    "images/solar_test_3_right_35overlap.jpg",
+]
+TEST_POSITIONS = [
+    (0, 0),
+    (51, 0),
+]
 
 # PRELOADED_OUTPUT_PATH = os.path.join(
 #     OUTPUT_FOLDER,
@@ -19,7 +25,7 @@ IMG2_PATH = "images/demo_split_right_52overlap.jpg"
 # left
 # down
 # up
-DIRECTION = "right"
+# DIRECTION = "right"
 
 MIN_OVERLAP = 0.15 
 MAX_OVERLAP = 0.90
@@ -39,71 +45,238 @@ previous_frame = None
 previous_x = None
 previous_y = None
 
+#live mosaic state
+captured_frames = []
+global_transforms = []
+
+previous_frame = None
+previous_transform = None
+
+previous_x = None
+previous_y = None
+
 live_pair_number = 0
 
 
 # camera entry point
 
-def process_image(frame, x, y, path):
-    """
-    Receives an image from the camera queue
-    the first frame is stored
-    then every frame after that is stitched to the previous frame
-    """
+def build_mosaic(frames, transforms):
 
+    if len(frames) == 0:
+        return None
+
+    all_corners = []
+
+    #find where every image lands
+    for frame, H in zip(frames, transforms):
+
+        h, w = frame.shape[:2]
+
+        corners = np.float32([
+            [0, 0],
+            [w, 0],
+            [w, h],
+            [0, h]
+        ]).reshape(-1, 1, 2)
+
+        transformed_corners = cv2.perspectiveTransform(
+            corners,
+            H
+        )
+
+        all_corners.append(transformed_corners)
+
+    all_corners = np.concatenate(all_corners, axis=0 )
+
+    xmin, ymin = np.floor(all_corners.min(axis=0).ravel() ).astype(int)
+
+    xmax, ymax = np.ceil(all_corners.max(axis=0).ravel() ).astype(int)
+
+    canvas_width = xmax - xmin
+    canvas_height = ymax - ymin
+
+    #move everything so there are no negative coordinates
+    canvas_shift = np.array([
+        [1.0, 0.0, -xmin],
+        [0.0, 1.0, -ymin],
+        [0.0, 0.0, 1.0]
+    ], dtype=np.float64)
+
+    #used to combine all of the images
+    image_sum = np.zeros(
+        (canvas_height, canvas_width, 3),
+        dtype=np.float32
+    )
+
+    weight_sum = np.zeros(
+        (canvas_height, canvas_width),
+        dtype=np.float32
+    )
+
+    for frame, H in zip(frames, transforms):
+
+        h, w = frame.shape[:2]
+
+        final_H = canvas_shift @ H
+
+        warped = cv2.warpPerspective(
+            frame,
+            final_H,
+            (canvas_width, canvas_height)
+        )
+
+        mask = cv2.warpPerspective(
+            np.ones((h, w), dtype=np.uint8) * 255,
+            final_H,
+            (canvas_width, canvas_height)
+        )
+
+        #feathering weight
+        distance = cv2.distanceTransform(
+            mask,
+            cv2.DIST_L2,
+            5
+        )
+
+        #give valid pixels a small minimum weight
+        distance[mask > 0] += 1.0
+
+        image_sum += (
+            warped.astype(np.float32)
+            * distance[:, :, np.newaxis]
+        )
+
+        weight_sum += distance
+
+    #avoid divide by zero
+    valid = weight_sum > 0
+
+    result = np.zeros(
+        (canvas_height, canvas_width, 3),
+        dtype=np.uint8
+    )
+
+    result[valid] = (image_sum[valid] / weight_sum[valid, np.newaxis]).astype(np.uint8)
+
+    return result
+
+
+def determine_direction(previous_x, previous_y, current_x, current_y):
+
+    dx = current_x - previous_x
+    dy = current_y - previous_y
+
+    #no movement
+    if dx == 0 and dy == 0:
+        raise ValueError("Current image has the same position as the previous image.")
+
+    #horizontal movement
+    if abs(dx) > abs(dy):
+
+        if dx > 0:
+            return "right"
+        else:
+            return "left"
+
+    #vertical movement
+    else:
+
+        if dy < 0:
+            return "down"
+        else:
+            return "up"
+
+
+def process_image(frame, x, y, path):
     global previous_frame
+    global previous_transform
+
     global previous_x
     global previous_y
+
+    global captured_frames
+    global global_transforms
+
     global live_pair_number
 
     print("New camera image received")
     print("Position:", (x, y))
     print("Image path:", path)
 
-    # First camera image
-
-    # There is nothing to stitch it to yet,
-    # so just save it as the reference.
+    #first image
     if previous_frame is None:
 
         previous_frame = frame.copy()
+
+        previous_transform = np.eye(
+            3,
+            dtype=np.float64
+        )
+
         previous_x = x
         previous_y = y
+
+        captured_frames.append(
+            frame.copy()
+        )
+
+        global_transforms.append(
+            previous_transform.copy()
+        )
 
         print("First camera image stored.")
         print("Waiting for next image...")
 
         return
 
-
-    # second image and later
-
     print(
-        "Stitching previous imagee",
+        "Stitching previous image",
         (previous_x, previous_y),
         "to current image",
         (x, y)
     )
 
-    result, H = stitch_pair(
+    direction = determine_direction(
+    previous_x,
+    previous_y,
+    x,
+    y
+    )
+
+    print(
+        "Detected scan direction:",
+        direction
+    )
+
+    #find the translation between the two neighboring images
+    pair_result, pair_H = stitch_pair(
         previous_frame,
         frame,
-        direction=DIRECTION,
         min_overlap=MIN_OVERLAP,
         max_overlap=MAX_OVERLAP,
         output_folder=OUTPUT_FOLDER
     )
 
+    #pair_H maps the current image into the previous image
+    #coordinate system, so combine it with the previous
+    #global position
+    current_transform = (
+        previous_transform
+        @ pair_H
+    )
 
-    # save live result
+    captured_frames.append(frame.copy())
+
+    global_transforms.append(current_transform.copy() )
+
+    #build one mosaic using every image so far
+    mosaic = build_mosaic(captured_frames, global_transforms)
 
     live_pair_number += 1
 
     output_name = (
-        f"live_stitch_{live_pair_number:03d}_"
-        f"x{previous_x:03d}_y{previous_y:03d}_"
-        f"to_"
-        f"x{x:03d}_y{y:03d}.jpg"
+        f"live_mosaic_"
+        f"{live_pair_number:03d}.jpg"
     )
 
     output_path = os.path.join(
@@ -113,19 +286,27 @@ def process_image(frame, x, y, path):
 
     cv2.imwrite(
         output_path,
-        result
+        mosaic
     )
 
-    print("Live stitch complete.")
-    print("Saved:", output_path)
+    print(
+        "Mosaic updated with",
+        len(captured_frames),
+        "images"
+    )
 
-    print("Transformation:")
-    print(H)
+    print(
+        "Saved:",
+        output_path
+    )
 
-
-    #the current image becomes the next reference
-
+    #current image becomes reference for next image
     previous_frame = frame.copy()
+
+    previous_transform = (
+        current_transform.copy()
+    )
+
     previous_x = x
     previous_y = y
 
@@ -1187,44 +1368,57 @@ def stitch_pair(
 
     return result, H
 
+def finish_stitching():
+
+    if len(captured_frames) == 0:
+        print("No images were captured.")
+        return
+
+    final_mosaic = build_mosaic(
+        captured_frames,
+        global_transforms
+    )
+
+    timestamp = datetime.now().strftime(
+        "%Y%m%d_%H%M%S"
+    )
+
+    final_path = os.path.join(
+        OUTPUT_FOLDER,
+        f"final_mosaic_{timestamp}.jpg"
+    )
+
+    saved = cv2.imwrite(
+        final_path,
+        final_mosaic
+    )
+
+    if saved:
+        print(
+            "Final mosaic saved:",
+            os.path.abspath(final_path)
+        )
+    else:
+        print(
+            "ERROR: image was not saved"
+        )
+
+    print(
+        "Total images:",
+        len(captured_frames)
+    )
 
  
 # main test
 
 if __name__ == "__main__":
 
-    output_name = ("demo_stitched.jpg" )
-
-    OUTPUT_PATH = os.path.join(
-        OUTPUT_FOLDER,
-        output_name
-    )
-
     os.makedirs(
         OUTPUT_FOLDER,
         exist_ok=True
     )
 
-    img1 = cv2.imread(
-        IMG1_PATH
-    )
-
-    img2 = cv2.imread(
-        IMG2_PATH
-    )
-
-    if (
-        img1 is None
-        or img2 is None
-    ):
-        raise RuntimeError(
-            "Could not load one or both images. "
-            "Check IMG1_PATH and IMG2_PATH."
-        )
-
-
-    print("\nStarting stitch...")
-    print("Direction:", DIRECTION)
+    print("\nStarting offline mosaic test...")
 
     print(
         "Allowed overlap:",
@@ -1235,28 +1429,31 @@ if __name__ == "__main__":
 
     print()
 
+    # fake scan positions for offline testing
+    # these just help process_image follow the same workflow
+    positions = []
 
-    result, H = stitch_pair(
-        img1,
-        img2,
-        direction=DIRECTION,
-        min_overlap=MIN_OVERLAP,
-        max_overlap=MAX_OVERLAP,
-        output_folder=OUTPUT_FOLDER
-    )
+    for path, (x, y) in zip(
+    TEST_IMAGE_PATHS,
+    TEST_POSITIONS
+    ):
 
+        print("Loading:", path)
 
-    cv2.imwrite(
-        OUTPUT_PATH,
-        result
-    )
+        img = cv2.imread(path)
 
+        if img is None:
+            raise RuntimeError(
+                f"Could not load image: {path}"
+            )
 
-    print("Stitch complete.")
-    print("Saved:", OUTPUT_PATH)
+        process_image(
+            img,
+            x,
+            y,
+            path
+        )
 
-    print(
-        "Final transformation:"
-    )
+    finish_stitching()
 
-    print(H)
+    print("pre loaded test complete.")
