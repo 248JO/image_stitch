@@ -3,16 +3,26 @@ import numpy as np
 import os
 from datetime import datetime
 
-OUTPUT_FOLDER = "outputs"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+OUTPUT_FOLDER = os.path.join(
+    BASE_DIR,
+    "outputs"
+)
+
+os.makedirs(
+    OUTPUT_FOLDER,
+    exist_ok=True
+)
 
 #pre made images used when stitch.py is run directly
 TEST_IMAGE_PATHS = [
-    "images/solar_test_3_left_35overlap.jpg",
-    "images/solar_test_3_right_35overlap.jpg",
+    "images/1test_x000_y000.jpg",
+    "images/1test_x051_y000.jpg",
 ]
 TEST_POSITIONS = [
     (0, 0),
-    (51, 0),
+    (-51, 0),
 ]
 
 # PRELOADED_OUTPUT_PATH = os.path.join(
@@ -86,34 +96,45 @@ def build_mosaic(frames, transforms):
 
         all_corners.append(transformed_corners)
 
-    all_corners = np.concatenate(all_corners, axis=0 )
+    all_corners = np.concatenate(
+        all_corners,
+        axis=0
+    )
 
-    xmin, ymin = np.floor(all_corners.min(axis=0).ravel() ).astype(int)
+    xmin, ymin = np.floor(
+        all_corners.min(axis=0).ravel()
+    ).astype(int)
 
-    xmax, ymax = np.ceil(all_corners.max(axis=0).ravel() ).astype(int)
+    xmax, ymax = np.ceil(
+        all_corners.max(axis=0).ravel()
+    ).astype(int)
 
     canvas_width = xmax - xmin
     canvas_height = ymax - ymin
 
-    #move everything so there are no negative coordinates
+    #shift everything onto positive canvas coordinates
     canvas_shift = np.array([
         [1.0, 0.0, -xmin],
         [0.0, 1.0, -ymin],
         [0.0, 0.0, 1.0]
     ], dtype=np.float64)
 
-    #used to combine all of the images
-    image_sum = np.zeros(
+    result = np.zeros(
         (canvas_height, canvas_width, 3),
         dtype=np.float32
     )
 
-    weight_sum = np.zeros(
+    result_mask = np.zeros(
         (canvas_height, canvas_width),
-        dtype=np.float32
+        dtype=np.uint8
     )
 
-    for frame, H in zip(frames, transforms):
+    #width of the actual feathered seam
+    FEATHER_WIDTH = 30
+
+    for i, (frame, H) in enumerate(
+        zip(frames, transforms)
+    ):
 
         h, w = frame.shape[:2]
 
@@ -123,42 +144,172 @@ def build_mosaic(frames, transforms):
             frame,
             final_H,
             (canvas_width, canvas_height)
-        )
+        ).astype(np.float32)
 
         mask = cv2.warpPerspective(
-            np.ones((h, w), dtype=np.uint8) * 255,
+            np.ones(
+                (h, w),
+                dtype=np.uint8
+            ) * 255,
             final_H,
-            (canvas_width, canvas_height)
+            (canvas_width, canvas_height),
+            flags=cv2.INTER_NEAREST
         )
 
-        #feathering weight
-        distance = cv2.distanceTransform(
-            mask,
-            cv2.DIST_L2,
-            5
+        new_pixels = mask > 0
+
+        #first image
+        if i == 0:
+
+            result[new_pixels] = warped[new_pixels]
+            result_mask[new_pixels] = 255
+
+            continue
+
+        old_pixels = result_mask > 0
+
+        #areas only covered by the new image
+        only_new = (
+            new_pixels
+            & ~old_pixels
         )
 
-        #give valid pixels a small minimum weight
-        distance[mask > 0] += 1.0
+        result[only_new] = warped[only_new]
 
-        image_sum += (
-            warped.astype(np.float32)
-            * distance[:, :, np.newaxis]
+        #overlap between mosaic and new image
+        overlap = (
+            new_pixels
+            & old_pixels
         )
 
-        weight_sum += distance
+        if np.any(overlap):
 
-    #avoid divide by zero
-    valid = weight_sum > 0
+            ys, xs = np.where(overlap)
 
-    result = np.zeros(
-        (canvas_height, canvas_width, 3),
-        dtype=np.uint8
-    )
+            overlap_xmin = xs.min()
+            overlap_xmax = xs.max()
 
-    result[valid] = (image_sum[valid] / weight_sum[valid, np.newaxis]).astype(np.uint8)
+            overlap_ymin = ys.min()
+            overlap_ymax = ys.max()
 
-    return result
+            #determine how this image moved relative
+            #to the previous image
+            previous_H = transforms[i - 1]
+
+            move_x = (
+                H[0, 2]
+                - previous_H[0, 2]
+            )
+
+            move_y = (
+                H[1, 2]
+                - previous_H[1, 2]
+            )
+
+            alpha = np.zeros(
+                (canvas_height, canvas_width),
+                dtype=np.float32
+            )
+
+            #horizontal scan
+            if abs(move_x) >= abs(move_y):
+
+                seam = (
+                    overlap_xmin
+                    + overlap_xmax
+                ) / 2.0
+
+                x_coords = np.arange(
+                    canvas_width
+                )[np.newaxis, :]
+
+                #new image is on the right
+                if move_x > 0:
+
+                    alpha_line = (
+                        x_coords
+                        - (
+                            seam
+                            - FEATHER_WIDTH / 2
+                        )
+                    ) / FEATHER_WIDTH
+
+                #new image is on the left
+                else:
+
+                    alpha_line = (
+                        (
+                            seam
+                            + FEATHER_WIDTH / 2
+                        )
+                        - x_coords
+                    ) / FEATHER_WIDTH
+
+                alpha_line = np.clip(
+                    alpha_line,
+                    0.0,
+                    1.0
+                )
+
+                alpha[:] = alpha_line
+
+            #vertical scan
+            else:
+
+                seam = (
+                    overlap_ymin
+                    + overlap_ymax
+                ) / 2.0
+
+                y_coords = np.arange(
+                    canvas_height
+                )[:, np.newaxis]
+
+                #new image is below
+                if move_y > 0:
+
+                    alpha_line = (
+                        y_coords
+                        - (
+                            seam
+                            - FEATHER_WIDTH / 2
+                        )
+                    ) / FEATHER_WIDTH
+
+                #new image is above
+                else:
+
+                    alpha_line = (
+                        (
+                            seam
+                            + FEATHER_WIDTH / 2
+                        )
+                        - y_coords
+                    ) / FEATHER_WIDTH
+
+                alpha_line = np.clip(
+                    alpha_line,
+                    0.0,
+                    1.0
+                )
+
+                alpha[:] = alpha_line
+
+            #blend only inside the overlap
+            a = alpha[overlap][:, np.newaxis]
+
+            result[overlap] = (
+                result[overlap] * (1.0 - a)
+                + warped[overlap] * a
+            )
+
+        result_mask[new_pixels] = 255
+
+    return np.clip(
+        result,
+        0,
+        255
+    ).astype(np.uint8)
 
 
 def determine_direction(previous_x, previous_y, current_x, current_y):
@@ -250,11 +401,12 @@ def process_image(frame, x, y, path):
 
     #find the translation between the two neighboring images
     pair_result, pair_H = stitch_pair(
-        previous_frame,
-        frame,
-        min_overlap=MIN_OVERLAP,
-        max_overlap=MAX_OVERLAP,
-        output_folder=OUTPUT_FOLDER
+    previous_frame,
+    frame,
+    direction=direction,
+    min_overlap=MIN_OVERLAP,
+    max_overlap=MAX_OVERLAP,
+    output_folder=OUTPUT_FOLDER
     )
 
     #pair_H maps the current image into the previous image
