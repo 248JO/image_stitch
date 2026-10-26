@@ -21,8 +21,8 @@ TEST_IMAGE_PATHS = [
     "images/1test_x051_y000.jpg",
 ]
 TEST_POSITIONS = [
-    (0, 0),
-    (-51, 0),
+    (10, 0),
+    (51, 0),
 ]
 
 # PRELOADED_OUTPUT_PATH = os.path.join(
@@ -325,17 +325,17 @@ def determine_direction(previous_x, previous_y, current_x, current_y):
     if abs(dx) > abs(dy):
 
         if dx > 0:
-            return "right"
-        else:
             return "left"
+        else:
+            return "right"
 
     #vertical movement
     else:
 
         if dy < 0:
-            return "down"
-        else:
             return "up"
+        else:
+            return "down"
 
 
 def process_image(frame, x, y, path):
