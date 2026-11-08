@@ -17,13 +17,12 @@ os.makedirs(
 
 #pre made images used when stitch.py is run directly
 TEST_IMAGE_PATHS = [
-    "images/1test_x000_y000.jpg",
-    "images/1test_x051_y000.jpg",
+    "images/test_01_x150_y000.jpg",
+    "images/test_02_x100_y000.jpg",
+    "images/test_03_x050_y000.jpg",
+    "images/test_04_x000_y000.jpg",
 ]
-TEST_POSITIONS = [
-    (10, 0),
-    (51, 0),
-]
+TEST_POSITIONS = [(150, 0), (100, 0), (50, 0), (0, 0)]
 
 # PRELOADED_OUTPUT_PATH = os.path.join(
 #     OUTPUT_FOLDER,
@@ -1556,7 +1555,7 @@ def finish_stitching():
         )
 
     print(
-        "Total images:",
+        "Images stitched into mosaic:",
         len(captured_frames)
     )
 
